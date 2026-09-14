@@ -1,0 +1,33 @@
+menu "START edge analyzer configuration"
+
+config START_ANALYZER_GPIO_ESP01
+    int "ESP01 input GPIO"
+    range 0 48
+    default 4
+
+config START_ANALYZER_GPIO_ESP02
+    int "ESP02 input GPIO"
+    range 0 48
+    default 5
+
+config START_ANALYZER_GPIO_ESP03
+    int "ESP03 input GPIO"
+    range 0 48
+    default 6
+
+config START_ANALYZER_GPIO_ESP04
+    int "ESP04 input GPIO"
+    range 0 48
+    default 7
+
+config START_ANALYZER_GPIO_ESP05
+    int "ESP05 input GPIO"
+    range 0 48
+    default 15
+
+config START_ANALYZER_UART_BAUD
+    int "Host serial baud"
+    range 9600 2000000
+    default 115200
+
+endmenu
