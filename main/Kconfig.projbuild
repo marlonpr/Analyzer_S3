@@ -1,29 +1,19 @@
-menu "START / presentation edge analyzer configuration"
+menu "SQW / display correlation analyzer"
 
-config START_ANALYZER_GPIO_ESP01
-    int "ESP01 input GPIO"
+config START_ANALYZER_GPIO_SQW
+    int "ESP01 DS3231 SQW input GPIO"
     range 0 48
     default 4
 
-config START_ANALYZER_GPIO_ESP02
-    int "ESP02 input GPIO"
+config START_ANALYZER_GPIO_COMMIT
+    int "ESP01 commit-marker input GPIO"
     range 0 48
     default 5
 
-config START_ANALYZER_GPIO_ESP03
-    int "ESP03 input GPIO"
+config START_ANALYZER_GPIO_REFRESH
+    int "ESP01 refresh-adoption input GPIO"
     range 0 48
     default 6
-
-config START_ANALYZER_GPIO_ESP04
-    int "ESP04 input GPIO"
-    range 0 48
-    default 7
-
-config START_ANALYZER_GPIO_ESP05
-    int "ESP05 input GPIO"
-    range 0 48
-    default 15
 
 config START_ANALYZER_UART_BAUD
     int "Host serial baud"

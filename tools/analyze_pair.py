@@ -13,8 +13,8 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("log", type=Path, help="serial log containing ANZ|EDGE records")
     p.add_argument("--run", type=int, default=None)
     p.add_argument("--trial", type=int, default=None)
-    p.add_argument("--a", default="ESP01")
-    p.add_argument("--b", default="ESP02")
+    p.add_argument("--a", default="ESP01_COMMIT")
+    p.add_argument("--b", default="ESP02_COMMIT")
     return p.parse_args()
 
 
@@ -41,9 +41,9 @@ def main() -> int:
         if "ANZ|EDGE|" in line:
             line = line[line.index("ANZ|EDGE|"):]
             parts = line.split("|")
-            if len(parts) != 7:
+            if len(parts) < 7:
                 continue
-            _, kind, run_s, trial_s, _channel_s, device, ts_s = parts
+            _, kind, run_s, trial_s, _channel_s, device, ts_s = parts[:7]
             if kind != "EDGE":
                 continue
             try:

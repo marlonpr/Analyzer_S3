@@ -21,28 +21,26 @@
 namespace {
 
 constexpr uart_port_t kHostUart = UART_NUM_0;
-constexpr std::size_t kChannelCount = 5;
+constexpr std::size_t kChannelCount = 3;
 constexpr std::size_t kCommandBufferLength = 128;
 constexpr std::size_t kOutputBufferLength = 192;
 constexpr std::size_t kEdgeQueueLength = 256;
-constexpr int64_t kMinAcceptedEdgeSpacingUs = 100000;  // reject ringing/chatter; real markers are ~1 s apart
 
 constexpr std::array<gpio_num_t, kChannelCount> kInputPins = {
-    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_ESP01),
-    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_ESP02),
-    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_ESP03),
-    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_ESP04),
-    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_ESP05),
+    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_SQW),
+    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_COMMIT),
+    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_REFRESH),
 };
 
 constexpr std::array<const char*, kChannelCount> kDeviceIds = {
-    "ESP01", "ESP02", "ESP03", "ESP04", "ESP05"
+    "ESP01_SQW", "ESP01_COMMIT", "ESP01_REFRESH"
 };
 
 struct EdgeEvent {
     uint64_t run_id{};
     uint32_t trial_id{};
     uint8_t channel{};
+    uint8_t level{};
     int64_t timestamp_us{};
 };
 
@@ -52,8 +50,6 @@ struct CaptureState {
     uint32_t trial_id{};
     uint8_t seen_mask{};
     std::array<uint32_t, kChannelCount> edge_counts{};
-    std::array<int64_t, kChannelCount> last_accepted_edge_us{};
-    uint32_t filtered_edges{};
     uint32_t dropped_events{};
 };
 
@@ -84,8 +80,8 @@ void WriteProtocolLine(const char* format, ...) {
     }
 }
 
-uint8_t PopCount5(uint8_t value) {
-    value &= 0x1F;
+uint8_t PopCountChannels(uint8_t value) {
+    value &= 0x07;
     uint8_t count = 0;
     while (value != 0) {
         count += static_cast<uint8_t>(value & 1U);
@@ -95,34 +91,30 @@ uint8_t PopCount5(uint8_t value) {
 }
 
 void IRAM_ATTR EdgeIsr(void* arg) {
-    // Capture time immediately on ISR entry. Five ISR callbacks are serviced
+    // Capture time immediately on ISR entry. Six ISR callbacks are serviced
     // sequentially, so same-pulse channel skew must be calibrated once before
     // the experiment. For the 100+ us effects under test this ISR latency is
     // expected to be negligible, but the calibration makes that measurable.
     const int64_t timestamp_us = esp_timer_get_time();
     const uint32_t channel = static_cast<uint32_t>(reinterpret_cast<uintptr_t>(arg));
     if (channel >= kChannelCount) return;
+    const uint8_t level = static_cast<uint8_t>(gpio_get_level(kInputPins[channel]) != 0);
 
     EdgeEvent event{};
     bool should_queue = false;
 
     portENTER_CRITICAL_ISR(&state_mux);
     if (capture_state.armed) {
-        const int64_t last_us = capture_state.last_accepted_edge_us[channel];
-        if (last_us == 0 || (timestamp_us - last_us) >= kMinAcceptedEdgeSpacingUs) {
-            const uint8_t bit = static_cast<uint8_t>(1U << channel);
-            capture_state.seen_mask = static_cast<uint8_t>(capture_state.seen_mask | bit);
-            capture_state.last_accepted_edge_us[channel] = timestamp_us;
-            ++capture_state.edge_counts[channel];
+        const uint8_t bit = static_cast<uint8_t>(1U << channel);
+        capture_state.seen_mask = static_cast<uint8_t>(capture_state.seen_mask | bit);
+        ++capture_state.edge_counts[channel];
 
-            event.run_id = capture_state.run_id;
-            event.trial_id = capture_state.trial_id;
-            event.channel = static_cast<uint8_t>(channel);
-            event.timestamp_us = timestamp_us;
-            should_queue = true;
-        } else {
-            ++capture_state.filtered_edges;
-        }
+        event.run_id = capture_state.run_id;
+        event.trial_id = capture_state.trial_id;
+        event.channel = static_cast<uint8_t>(channel);
+        event.level = level;
+        event.timestamp_us = timestamp_us;
+        should_queue = true;
     }
     portEXIT_CRITICAL_ISR(&state_mux);
 
@@ -150,12 +142,13 @@ void EdgeOutputTask(void*) {
     while (true) {
         if (xQueueReceive(edge_queue, &event, portMAX_DELAY) == pdTRUE) {
             WriteProtocolLine(
-                "ANZ|EDGE|%" PRIu64 "|%" PRIu32 "|%u|%s|%" PRId64,
+                "ANZ|EDGE|%" PRIu64 "|%" PRIu32 "|%u|%s|%" PRId64 "|%u",
                 event.run_id,
                 event.trial_id,
                 static_cast<unsigned>(event.channel + 1U),
                 kDeviceIds[event.channel],
-                event.timestamp_us);
+                event.timestamp_us,
+                static_cast<unsigned>(event.level));
         }
     }
 }
@@ -187,8 +180,6 @@ void BeginTrial(uint64_t run_id, uint32_t trial_id) {
     capture_state.trial_id = trial_id;
     capture_state.seen_mask = 0;
     capture_state.edge_counts.fill(0);
-    capture_state.last_accepted_edge_us.fill(0);
-    capture_state.filtered_edges = 0;
     capture_state.dropped_events = 0;
     capture_state.armed = true;
     portEXIT_CRITICAL(&state_mux);
@@ -229,22 +220,17 @@ void EndTrial(uint64_t run_id, uint32_t trial_id) {
         run_id,
         trial_id,
         static_cast<unsigned>(snapshot.seen_mask),
-        static_cast<unsigned>(PopCount5(snapshot.seen_mask)));
+        static_cast<unsigned>(PopCountChannels(snapshot.seen_mask)));
 
-    // New long-capture integrity record. For a complete two-device 30-minute
-    // countdown, ESP01 and ESP02 should have matching counts and dropped=0.
+    // Long-capture integrity record.
     WriteProtocolLine(
         "ANZ|COUNTS|%" PRIu64 "|%" PRIu32
-        "|ESP01=%" PRIu32 "|ESP02=%" PRIu32 "|ESP03=%" PRIu32
-        "|ESP04=%" PRIu32 "|ESP05=%" PRIu32 "|filtered=%" PRIu32 "|dropped=%" PRIu32,
+        "|ESP01_SQW=%" PRIu32 "|ESP01_COMMIT=%" PRIu32 "|ESP01_REFRESH=%" PRIu32 "|dropped=%" PRIu32,
         run_id,
         trial_id,
         snapshot.edge_counts[0],
         snapshot.edge_counts[1],
         snapshot.edge_counts[2],
-        snapshot.edge_counts[3],
-        snapshot.edge_counts[4],
-        snapshot.filtered_edges,
         snapshot.dropped_events);
 }
 
@@ -256,20 +242,16 @@ void ReportStatus() {
 
     WriteProtocolLine(
         "ANZ|STATUS|armed=%u|run=%" PRIu64 "|trial=%" PRIu32
-        "|mask=0x%02X|count=%u|ESP01=%" PRIu32 "|ESP02=%" PRIu32
-        "|ESP03=%" PRIu32 "|ESP04=%" PRIu32 "|ESP05=%" PRIu32
-        "|filtered=%" PRIu32 "|dropped=%" PRIu32,
+        "|mask=0x%02X|count=%u|ESP01_SQW=%" PRIu32 "|ESP01_COMMIT=%" PRIu32
+        "|ESP01_REFRESH=%" PRIu32 "|dropped=%" PRIu32,
         snapshot.armed ? 1U : 0U,
         snapshot.run_id,
         snapshot.trial_id,
         static_cast<unsigned>(snapshot.seen_mask),
-        static_cast<unsigned>(PopCount5(snapshot.seen_mask)),
+        static_cast<unsigned>(PopCountChannels(snapshot.seen_mask)),
         snapshot.edge_counts[0],
         snapshot.edge_counts[1],
         snapshot.edge_counts[2],
-        snapshot.edge_counts[3],
-        snapshot.edge_counts[4],
-        snapshot.filtered_edges,
         snapshot.dropped_events);
 }
 
@@ -382,8 +364,11 @@ void InitialiseInputs() {
     config.pin_bit_mask = pin_mask;
     config.mode = GPIO_MODE_INPUT;
     config.pull_up_en = GPIO_PULLUP_DISABLE;
-    config.pull_down_en = GPIO_PULLDOWN_ENABLE;
-    config.intr_type = GPIO_INTR_POSEDGE;
+    // High-impedance inputs: GPIO4 observes the DS3231 open-drain SQW node,
+    // whose pull-up is provided by the timer ESP32. Do not add analyzer-side
+    // pull-up/pulldown loading.
+    config.pull_down_en = GPIO_PULLDOWN_DISABLE;
+    config.intr_type = GPIO_INTR_ANYEDGE;
     ESP_ERROR_CHECK(gpio_config(&config));
 
     ESP_ERROR_CHECK(gpio_install_isr_service(ESP_INTR_FLAG_IRAM));
@@ -413,15 +398,12 @@ extern "C" void app_main() {
     }
 
     WriteProtocolLine(
-        "ANZ|READY|baud=%d|ESP01=%d|ESP02=%d|ESP03=%d|ESP04=%d|ESP05=%d",
+        "ANZ|READY|baud=%d|ESP01_SQW=%d|ESP01_COMMIT=%d|ESP01_REFRESH=%d",
         CONFIG_START_ANALYZER_UART_BAUD,
         static_cast<int>(kInputPins[0]),
         static_cast<int>(kInputPins[1]),
-        static_cast<int>(kInputPins[2]),
-        static_cast<int>(kInputPins[3]),
-        static_cast<int>(kInputPins[4]));
+        static_cast<int>(kInputPins[2]));
     WriteProtocolLine(
-        "ANZ|MODE|POSEDGE|continuous=1|refractory_us=%lld|queue=%u",
-        static_cast<long long>(kMinAcceptedEdgeSpacingUs),
+        "ANZ|MODE|ANYEDGE|continuous=1|queue=%u",
         static_cast<unsigned>(kEdgeQueueLength));
 }
