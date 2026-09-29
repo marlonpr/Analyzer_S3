@@ -1,4 +1,4 @@
-menu "START edge analyzer configuration"
+menu "START / presentation edge analyzer configuration"
 
 config START_ANALYZER_GPIO_ESP01
     int "ESP01 input GPIO"

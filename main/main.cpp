@@ -24,7 +24,8 @@ constexpr uart_port_t kHostUart = UART_NUM_0;
 constexpr std::size_t kChannelCount = 5;
 constexpr std::size_t kCommandBufferLength = 128;
 constexpr std::size_t kOutputBufferLength = 192;
-constexpr std::size_t kEdgeQueueLength = 64;
+constexpr std::size_t kEdgeQueueLength = 256;
+constexpr int64_t kMinAcceptedEdgeSpacingUs = 100000;  // reject ringing/chatter; real markers are ~1 s apart
 
 constexpr std::array<gpio_num_t, kChannelCount> kInputPins = {
     static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_ESP01),
@@ -49,7 +50,11 @@ struct CaptureState {
     bool armed{};
     uint64_t run_id{};
     uint32_t trial_id{};
-    uint8_t edge_mask{};
+    uint8_t seen_mask{};
+    std::array<uint32_t, kChannelCount> edge_counts{};
+    std::array<int64_t, kChannelCount> last_accepted_edge_us{};
+    uint32_t filtered_edges{};
+    uint32_t dropped_events{};
 };
 
 QueueHandle_t edge_queue = nullptr;
@@ -102,21 +107,39 @@ void IRAM_ATTR EdgeIsr(void* arg) {
     bool should_queue = false;
 
     portENTER_CRITICAL_ISR(&state_mux);
-    const uint8_t bit = static_cast<uint8_t>(1U << channel);
-    if (capture_state.armed && (capture_state.edge_mask & bit) == 0) {
-        capture_state.edge_mask = static_cast<uint8_t>(capture_state.edge_mask | bit);
-        event.run_id = capture_state.run_id;
-        event.trial_id = capture_state.trial_id;
-        event.channel = static_cast<uint8_t>(channel);
-        event.timestamp_us = timestamp_us;
-        should_queue = true;
+    if (capture_state.armed) {
+        const int64_t last_us = capture_state.last_accepted_edge_us[channel];
+        if (last_us == 0 || (timestamp_us - last_us) >= kMinAcceptedEdgeSpacingUs) {
+            const uint8_t bit = static_cast<uint8_t>(1U << channel);
+            capture_state.seen_mask = static_cast<uint8_t>(capture_state.seen_mask | bit);
+            capture_state.last_accepted_edge_us[channel] = timestamp_us;
+            ++capture_state.edge_counts[channel];
+
+            event.run_id = capture_state.run_id;
+            event.trial_id = capture_state.trial_id;
+            event.channel = static_cast<uint8_t>(channel);
+            event.timestamp_us = timestamp_us;
+            should_queue = true;
+        } else {
+            ++capture_state.filtered_edges;
+        }
     }
     portEXIT_CRITICAL_ISR(&state_mux);
 
     if (!should_queue || edge_queue == nullptr) return;
 
     BaseType_t higher_priority_woken = pdFALSE;
-    xQueueSendFromISR(edge_queue, &event, &higher_priority_woken);
+    const BaseType_t queued = xQueueSendFromISR(edge_queue, &event, &higher_priority_woken);
+    if (queued != pdTRUE) {
+        portENTER_CRITICAL_ISR(&state_mux);
+        if (capture_state.run_id == event.run_id &&
+            capture_state.trial_id == event.trial_id) {
+            ++capture_state.dropped_events;
+        }
+        portEXIT_CRITICAL_ISR(&state_mux);
+        return;
+    }
+
     if (higher_priority_woken == pdTRUE) {
         portYIELD_FROM_ISR();
     }
@@ -162,7 +185,11 @@ void BeginTrial(uint64_t run_id, uint32_t trial_id) {
     capture_state.armed = false;
     capture_state.run_id = run_id;
     capture_state.trial_id = trial_id;
-    capture_state.edge_mask = 0;
+    capture_state.seen_mask = 0;
+    capture_state.edge_counts.fill(0);
+    capture_state.last_accepted_edge_us.fill(0);
+    capture_state.filtered_edges = 0;
+    capture_state.dropped_events = 0;
     capture_state.armed = true;
     portEXIT_CRITICAL(&state_mux);
 
@@ -170,13 +197,13 @@ void BeginTrial(uint64_t run_id, uint32_t trial_id) {
 }
 
 void EndTrial(uint64_t run_id, uint32_t trial_id) {
-    uint8_t mask = 0;
+    CaptureState snapshot{};
     bool matched = false;
 
     portENTER_CRITICAL(&state_mux);
     if (capture_state.run_id == run_id && capture_state.trial_id == trial_id) {
-        mask = capture_state.edge_mask;
         capture_state.armed = false;
+        snapshot = capture_state;
         matched = true;
     }
     portEXIT_CRITICAL(&state_mux);
@@ -186,15 +213,39 @@ void EndTrial(uint64_t run_id, uint32_t trial_id) {
         return;
     }
 
-    // Give EdgeOutputTask a short opportunity to drain events already queued by
-    // the ISRs so SUMMARY normally follows all EDGE records for this trial.
-    vTaskDelay(pdMS_TO_TICKS(2));
+    // At one edge per second per active channel the queue should normally be
+    // empty. Drain any final simultaneous edges before the summary records are
+    // written. Once the queue reaches zero, output_mutex serializes SUMMARY
+    // after any event already dequeued and currently being written.
+    for (uint32_t waited_ms = 0; waited_ms < 250; ++waited_ms) {
+        if (uxQueueMessagesWaiting(edge_queue) == 0) break;
+        vTaskDelay(pdMS_TO_TICKS(1));
+    }
+
+    // Preserve the original SUMMARY format for existing host tooling. The mask
+    // now means "channel seen at least once during the trial".
     WriteProtocolLine(
         "ANZ|SUMMARY|%" PRIu64 "|%" PRIu32 "|0x%02X|%u",
         run_id,
         trial_id,
-        static_cast<unsigned>(mask),
-        static_cast<unsigned>(PopCount5(mask)));
+        static_cast<unsigned>(snapshot.seen_mask),
+        static_cast<unsigned>(PopCount5(snapshot.seen_mask)));
+
+    // New long-capture integrity record. For a complete two-device 30-minute
+    // countdown, ESP01 and ESP02 should have matching counts and dropped=0.
+    WriteProtocolLine(
+        "ANZ|COUNTS|%" PRIu64 "|%" PRIu32
+        "|ESP01=%" PRIu32 "|ESP02=%" PRIu32 "|ESP03=%" PRIu32
+        "|ESP04=%" PRIu32 "|ESP05=%" PRIu32 "|filtered=%" PRIu32 "|dropped=%" PRIu32,
+        run_id,
+        trial_id,
+        snapshot.edge_counts[0],
+        snapshot.edge_counts[1],
+        snapshot.edge_counts[2],
+        snapshot.edge_counts[3],
+        snapshot.edge_counts[4],
+        snapshot.filtered_edges,
+        snapshot.dropped_events);
 }
 
 void ReportStatus() {
@@ -204,12 +255,22 @@ void ReportStatus() {
     portEXIT_CRITICAL(&state_mux);
 
     WriteProtocolLine(
-        "ANZ|STATUS|armed=%u|run=%" PRIu64 "|trial=%" PRIu32 "|mask=0x%02X|count=%u",
+        "ANZ|STATUS|armed=%u|run=%" PRIu64 "|trial=%" PRIu32
+        "|mask=0x%02X|count=%u|ESP01=%" PRIu32 "|ESP02=%" PRIu32
+        "|ESP03=%" PRIu32 "|ESP04=%" PRIu32 "|ESP05=%" PRIu32
+        "|filtered=%" PRIu32 "|dropped=%" PRIu32,
         snapshot.armed ? 1U : 0U,
         snapshot.run_id,
         snapshot.trial_id,
-        static_cast<unsigned>(snapshot.edge_mask),
-        static_cast<unsigned>(PopCount5(snapshot.edge_mask)));
+        static_cast<unsigned>(snapshot.seen_mask),
+        static_cast<unsigned>(PopCount5(snapshot.seen_mask)),
+        snapshot.edge_counts[0],
+        snapshot.edge_counts[1],
+        snapshot.edge_counts[2],
+        snapshot.edge_counts[3],
+        snapshot.edge_counts[4],
+        snapshot.filtered_edges,
+        snapshot.dropped_events);
 }
 
 void ProcessCommand(char* line) {
@@ -269,8 +330,11 @@ void SerialCommandTask(void*) {
         const int received = uart_read_bytes(kHostUart, &byte, 1, pdMS_TO_TICKS(100));
         if (received <= 0) continue;
 
-        if (byte == '\r') continue;
-        if (byte == '\n') {
+        // Accept CR, LF, or CRLF as a complete command terminator.
+        // Hercules commonly sends <CR> only; esp-idf-monitor terminals often
+        // send LF or CRLF. If CRLF arrives, the second terminator sees
+        // length == 0 and is ignored, so the command is processed only once.
+        if (byte == '\r' || byte == '\n') {
             if (length == 0) continue;
             line[length] = '\0';
             ProcessCommand(line);
@@ -356,4 +420,8 @@ extern "C" void app_main() {
         static_cast<int>(kInputPins[2]),
         static_cast<int>(kInputPins[3]),
         static_cast<int>(kInputPins[4]));
+    WriteProtocolLine(
+        "ANZ|MODE|POSEDGE|continuous=1|refractory_us=%lld|queue=%u",
+        static_cast<long long>(kMinAcceptedEdgeSpacingUs),
+        static_cast<unsigned>(kEdgeQueueLength));
 }
