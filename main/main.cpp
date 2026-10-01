@@ -21,19 +21,23 @@
 namespace {
 
 constexpr uart_port_t kHostUart = UART_NUM_0;
-constexpr std::size_t kChannelCount = 3;
+constexpr std::size_t kChannelCount = 6;
 constexpr std::size_t kCommandBufferLength = 128;
-constexpr std::size_t kOutputBufferLength = 192;
+constexpr std::size_t kOutputBufferLength = 384;
 constexpr std::size_t kEdgeQueueLength = 256;
 
 constexpr std::array<gpio_num_t, kChannelCount> kInputPins = {
     static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_SQW),
     static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_COMMIT),
     static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_REFRESH),
+    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_ESP02_SQW),
+    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_ESP02_COMMIT),
+    static_cast<gpio_num_t>(CONFIG_START_ANALYZER_GPIO_ESP02_REFRESH),
 };
 
 constexpr std::array<const char*, kChannelCount> kDeviceIds = {
-    "ESP01_SQW", "ESP01_COMMIT", "ESP01_REFRESH"
+    "ESP01_SQW", "ESP01_COMMIT", "ESP01_REFRESH",
+    "ESP02_SQW", "ESP02_COMMIT", "ESP02_REFRESH"
 };
 
 struct EdgeEvent {
@@ -81,7 +85,7 @@ void WriteProtocolLine(const char* format, ...) {
 }
 
 uint8_t PopCountChannels(uint8_t value) {
-    value &= 0x07;
+    value &= 0x3F;
     uint8_t count = 0;
     while (value != 0) {
         count += static_cast<uint8_t>(value & 1U);
@@ -225,12 +229,17 @@ void EndTrial(uint64_t run_id, uint32_t trial_id) {
     // Long-capture integrity record.
     WriteProtocolLine(
         "ANZ|COUNTS|%" PRIu64 "|%" PRIu32
-        "|ESP01_SQW=%" PRIu32 "|ESP01_COMMIT=%" PRIu32 "|ESP01_REFRESH=%" PRIu32 "|dropped=%" PRIu32,
+        "|ESP01_SQW=%" PRIu32 "|ESP01_COMMIT=%" PRIu32 "|ESP01_REFRESH=%" PRIu32
+        "|ESP02_SQW=%" PRIu32 "|ESP02_COMMIT=%" PRIu32 "|ESP02_REFRESH=%" PRIu32
+        "|dropped=%" PRIu32,
         run_id,
         trial_id,
         snapshot.edge_counts[0],
         snapshot.edge_counts[1],
         snapshot.edge_counts[2],
+        snapshot.edge_counts[3],
+        snapshot.edge_counts[4],
+        snapshot.edge_counts[5],
         snapshot.dropped_events);
 }
 
@@ -243,7 +252,8 @@ void ReportStatus() {
     WriteProtocolLine(
         "ANZ|STATUS|armed=%u|run=%" PRIu64 "|trial=%" PRIu32
         "|mask=0x%02X|count=%u|ESP01_SQW=%" PRIu32 "|ESP01_COMMIT=%" PRIu32
-        "|ESP01_REFRESH=%" PRIu32 "|dropped=%" PRIu32,
+        "|ESP01_REFRESH=%" PRIu32 "|ESP02_SQW=%" PRIu32 "|ESP02_COMMIT=%" PRIu32
+        "|ESP02_REFRESH=%" PRIu32 "|dropped=%" PRIu32,
         snapshot.armed ? 1U : 0U,
         snapshot.run_id,
         snapshot.trial_id,
@@ -252,6 +262,9 @@ void ReportStatus() {
         snapshot.edge_counts[0],
         snapshot.edge_counts[1],
         snapshot.edge_counts[2],
+        snapshot.edge_counts[3],
+        snapshot.edge_counts[4],
+        snapshot.edge_counts[5],
         snapshot.dropped_events);
 }
 
@@ -364,9 +377,9 @@ void InitialiseInputs() {
     config.pin_bit_mask = pin_mask;
     config.mode = GPIO_MODE_INPUT;
     config.pull_up_en = GPIO_PULLUP_DISABLE;
-    // High-impedance inputs: GPIO4 observes the DS3231 open-drain SQW node,
-    // whose pull-up is provided by the timer ESP32. Do not add analyzer-side
-    // pull-up/pulldown loading.
+    // High-impedance inputs: the SQW channels observe the DS3231 open-drain
+    // nodes. Their pull-ups are provided by the RTC modules/timer hardware.
+    // Do not add analyzer-side pull-up/pulldown loading.
     config.pull_down_en = GPIO_PULLDOWN_DISABLE;
     config.intr_type = GPIO_INTR_ANYEDGE;
     ESP_ERROR_CHECK(gpio_config(&config));
@@ -398,11 +411,15 @@ extern "C" void app_main() {
     }
 
     WriteProtocolLine(
-        "ANZ|READY|baud=%d|ESP01_SQW=%d|ESP01_COMMIT=%d|ESP01_REFRESH=%d",
+        "ANZ|READY|baud=%d|ESP01_SQW=%d|ESP01_COMMIT=%d|ESP01_REFRESH=%d"
+        "|ESP02_SQW=%d|ESP02_COMMIT=%d|ESP02_REFRESH=%d",
         CONFIG_START_ANALYZER_UART_BAUD,
         static_cast<int>(kInputPins[0]),
         static_cast<int>(kInputPins[1]),
-        static_cast<int>(kInputPins[2]));
+        static_cast<int>(kInputPins[2]),
+        static_cast<int>(kInputPins[3]),
+        static_cast<int>(kInputPins[4]),
+        static_cast<int>(kInputPins[5]));
     WriteProtocolLine(
         "ANZ|MODE|ANYEDGE|continuous=1|queue=%u",
         static_cast<unsigned>(kEdgeQueueLength));

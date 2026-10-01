@@ -1,4 +1,4 @@
-menu "SQW / display correlation analyzer"
+menu "Two-device RTC / display qualification analyzer"
 
 config START_ANALYZER_GPIO_SQW
     int "ESP01 DS3231 SQW input GPIO"
@@ -14,6 +14,21 @@ config START_ANALYZER_GPIO_REFRESH
     int "ESP01 refresh-adoption input GPIO"
     range 0 48
     default 6
+
+config START_ANALYZER_GPIO_ESP02_SQW
+    int "ESP02 DS3231 SQW input GPIO"
+    range 0 48
+    default 7
+
+config START_ANALYZER_GPIO_ESP02_COMMIT
+    int "ESP02 commit-marker input GPIO"
+    range 0 48
+    default 15
+
+config START_ANALYZER_GPIO_ESP02_REFRESH
+    int "ESP02 refresh-adoption input GPIO"
+    range 0 48
+    default 16
 
 config START_ANALYZER_UART_BAUD
     int "Host serial baud"
