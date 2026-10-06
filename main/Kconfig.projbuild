@@ -1,38 +1,53 @@
-menu "Two-device RTC / display qualification analyzer"
+menu "Analyzer v10 configuration"
 
-config START_ANALYZER_GPIO_SQW
-    int "ESP01 DS3231 SQW input GPIO"
-    range 0 48
-    default 4
-
-config START_ANALYZER_GPIO_COMMIT
-    int "ESP01 commit-marker input GPIO"
-    range 0 48
-    default 5
-
-config START_ANALYZER_GPIO_REFRESH
-    int "ESP01 refresh-adoption input GPIO"
-    range 0 48
-    default 6
-
-config START_ANALYZER_GPIO_ESP02_SQW
-    int "ESP02 DS3231 SQW input GPIO"
-    range 0 48
-    default 7
-
-config START_ANALYZER_GPIO_ESP02_COMMIT
-    int "ESP02 commit-marker input GPIO"
-    range 0 48
-    default 15
-
-config START_ANALYZER_GPIO_ESP02_REFRESH
-    int "ESP02 refresh-adoption input GPIO"
-    range 0 48
-    default 16
-
-config START_ANALYZER_UART_BAUD
-    int "Host serial baud"
-    range 9600 2000000
+config ANALYZER_V10_UART_BAUD
+    int "Analyzer UART baud rate"
     default 115200
+    range 9600 2000000
+
+config ANALYZER_V10_GPIO_ESP01_COMMIT
+    int "ESP01 COMMIT analyzer GPIO"
+    default 5
+    range 0 48
+
+config ANALYZER_V10_GPIO_ESP02_COMMIT
+    int "ESP02 COMMIT analyzer GPIO"
+    default 15
+    range 0 48
+
+config ANALYZER_V10_GPIO_ESP03_COMMIT
+    int "ESP03 COMMIT analyzer GPIO"
+    default 16
+    range 0 48
+
+config ANALYZER_V10_TRAIN_MIN_US
+    int "Minimum same-channel 1 Hz interval (us)"
+    default 995000
+    range 900000 1000000
+
+config ANALYZER_V10_TRAIN_MAX_US
+    int "Maximum same-channel 1 Hz interval (us)"
+    default 1005000
+    range 1000000 1100000
+
+config ANALYZER_V10_ASSOCIATION_WINDOW_US
+    int "Cross-device boundary association window (us)"
+    default 5000
+    range 100 50000
+
+config ANALYZER_V10_NEW_TRAIN_GAP_US
+    int "Gap that starts a new countdown train (us)"
+    default 1500000
+    range 1100000 10000000
+
+config ANALYZER_V10_START_GATED_BOUNDARIES
+    int "Number of initial boundaries gated by physical skew"
+    default 3
+    range 1 20
+
+config ANALYZER_V10_START_TRIPWIRE_US
+    int "Start max-min COMMIT tripwire (us)"
+    default 100
+    range 1 100000
 
 endmenu
