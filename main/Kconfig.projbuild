@@ -5,18 +5,30 @@ config ANALYZER_V10_UART_BAUD
     default 115200
     range 9600 2000000
 
+config ANALYZER_V10_CHANNEL1_NAME
+    string "Physical timer on analyzer channel 1"
+    default "ESP01"
+
+config ANALYZER_V10_CHANNEL2_NAME
+    string "Physical timer on analyzer channel 2"
+    default "ESP04"
+
+config ANALYZER_V10_CHANNEL3_NAME
+    string "Physical timer on analyzer channel 3"
+    default "ESP03"
+
 config ANALYZER_V10_GPIO_ESP01_COMMIT
-    int "ESP01 COMMIT analyzer GPIO"
+    int "Channel 1 COMMIT analyzer GPIO"
     default 5
     range 0 48
 
 config ANALYZER_V10_GPIO_ESP02_COMMIT
-    int "ESP02 COMMIT analyzer GPIO"
+    int "Channel 2 COMMIT analyzer GPIO"
     default 15
     range 0 48
 
 config ANALYZER_V10_GPIO_ESP03_COMMIT
-    int "ESP03 COMMIT analyzer GPIO"
+    int "Channel 3 COMMIT analyzer GPIO"
     default 16
     range 0 48
 

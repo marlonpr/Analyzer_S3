@@ -1,139 +1,71 @@
-# Analyzer_v10 — 3 physical devices, 1 Hz-aware pairing
+# Analyzer 10.1 — three physical COMMIT channels
 
-This analyzer intentionally uses **only three physical COMMIT inputs**:
+This revision fixes bootstrap grouping while retaining V10 qualification and its
+START-only physical gate. Alternating same-channel pairs qualify at
+995000..1005000 us; cross-channel association stays at 5000 us. Pending groups
+now have `TRAIN_MAX + association window` grace, letting each channel's next
+edge retrospectively qualify the original START before its group expires.
+Original timestamps are preserved. Real incomplete groups/dropped input fail.
+Host test `tests/host/negative_test.cpp` proves that on the saved capture: a
+removed START edge, a 10 ms late START and a skipped mid-train COMMIT each
+produce MISSING and a final FAIL, while the unmodified capture passes.
 
-- ESP01
-- ESP02
-- ESP03
+The first three boundaries in each train must have max-min span <=100 us.
+Later boundaries report INFO. A gap >1.5 s starts another train and resets the
+START gate. Multiple countdowns in one BEGIN/END capture are supported.
 
-ESP04 and ESP05 are **controller-only devices**. They are not wired to the
-analyzer and do not participate in the physical max-min calculation.
+## Wiring and physical identity
 
-## Default wiring
+| Channel | Analyzer ESP32-S3 GPIO | Default timer | Optional qualification timer |
+|---|---:|---|---|
+| 1 | 5 | ESP01 | ESP01 |
+| 2 | 15 | ESP04 | ESP04 |
+| 3 | 16 | ESP03 | ESP03 |
 
-| Timer | Timer GPIO | Analyzer ESP32-S3 GPIO |
-|---|---:|---:|
-| ESP01 | GPIO33 COMMIT | GPIO5 |
-| ESP02 | GPIO33 COMMIT | GPIO15 |
-| ESP03 | GPIO33 COMMIT | GPIO16 |
+Timer COMMIT output is GPIO33; connect common ground. This build is configured
+for the restored long-run mapping: channel 1 = ESP01, channel 2 = ESP04,
+channel 3 = ESP03. ESP02 and ESP05 are controller-only for this physical capture.
+The historical ESP01/ESP02/ESP03 fixture remains included only for replay tests.
 
-All grounds must be common.
+Default build in an ESP-IDF environment:
 
-## Why v10 does not pair raw edge #N
+```powershell
+idf.py set-target esp32s3
+idf.py build
+idf.py -p COMx flash monitor
+```
 
-Reset/re-arm/START_AT can toggle the COMMIT pin outside the countdown. v9
-paired raw ordinal edges, so one isolated edge shifted one board by a full
-second.
+For the physically wired ESP01/ESP04/ESP03 trio:
 
-v10 first decides whether an edge belongs to a genuine 1 Hz countdown train.
+```powershell
+idf.py -B build-0143 -D SDKCONFIG=sdkconfig.0143 -D "SDKCONFIG_DEFAULTS=sdkconfig.defaults;sdkconfig.v10_0143" set-target esp32s3
+idf.py -B build-0143 -D SDKCONFIG=sdkconfig.0143 build
+idf.py -B build-0143 -D SDKCONFIG=sdkconfig.0143 -p COMx flash monitor
+```
 
-A same-channel pair qualifies when:
+GPIO option names retain their earlier ESP01/02/03 spelling for compatibility;
+channel-name options define the physical EDGE/QUALIFIED/SKEW/COUNTS labels.
+The READY banner also prints the configured device name for each GPIO.
 
-    995000 us <= delta <= 1005000 us
+## Capture and replay
 
-and the logical level alternates.
+Send `BEGIN|1|1` with CR, LF or CRLF; expect `ANZ|ACK|BEGIN|1|1`. After the
+countdown send `END|1|1`. Save all EDGE/QUALIFIED/SKEW/COUNTS/TRAIN/TRIPWIRE lines.
 
-Only 1 Hz-qualified edges are allowed into cross-device association.
+The original 2026-10-07 capture is included unmodified:
 
-Qualified edges from the three boards are then associated within:
+```powershell
+python .\tools\check_v10_log.py .\tests\host\fixtures\20261007_original_v10_capture.txt --expect-start-ranges 46,48,68
+```
 
-    5000 us
+| Train | True START span | Worst three-boundary gate span | Complete boundaries |
+|---|---:|---:|---:|
+| 1 | 46 us | 46 us | 31 |
+| 2 | 48 us | 50 us | 31 |
+| 3 | 68 us | 68 us | 31 |
 
-This is deliberately much wider than the 100 us qualification limit. A real
-200 us fault must still be paired and reported as a trip, not silently
-discarded.
-
-## Start-only physical gate
-
-For each detected countdown train, only its first three qualified boundaries
-are hard-gated:
-
-    max(ESP01, ESP02, ESP03) - min(...) <= 100 us
-
-Later boundaries are still reported, but with:
-
-    gated=0
-    result=INFO
-
-This avoids incorrectly failing a long countdown because of legitimate RTC
-module-to-module ppm drift.
-
-## Multiple countdowns in one BEGIN/END capture
-
-Supported.
-
-If the gap between completed 1 Hz boundary groups is greater than 1.5 s, v10
-starts a new train and resets the three-boundary start gate.
-
-So one Hercules capture may contain, for example:
-
-    BEGIN|1|1<CR>
-      20 s countdown #1
-      20 s countdown #2
-      20 s countdown #3
-    END|1|1<CR>
-
-and the analyzer should report three `ANZ|TRAIN|...` records.
-
-## Hercules line endings
-
-CR, LF, and CRLF are accepted.
-
-    BEGIN|1|1<CR>
-
-must answer:
-
-    ANZ|ACK|BEGIN|1|1
-
-## Build
-
-    cd Analyzer_v10_3device_1hz
-    idf.py set-target esp32s3
-    idf.py menuconfig
-    idf.py build
-    idf.py -p COMx flash monitor
-
-The ESP-IDF 6.x component requirements are already included:
-
-    REQUIRES esp_driver_gpio esp_timer esp_driver_uart
-
-## Important output
-
-Raw input:
-
-    ANZ|EDGE|...
-
-1 Hz-qualified edge:
-
-    ANZ|QUALIFIED|...
-
-Physical association:
-
-    ANZ|SKEW|...|train=1|boundary=0|...|range_us=59|gated=1|result=PASS
-
-Per-countdown result:
-
-    ANZ|TRAIN|...|train=1|boundaries=21|gated=3|start_worst_range_us=60|...|result=PASS
-
-Final capture result:
-
-    ANZ|TRIPWIRE|...|mode=START_ONLY|limit_us=100|first_boundaries=3|trains=3|...|result=PASS
-
-## ESP04 and ESP05
-
-The analyzer intentionally knows nothing about their COMMIT pins.
-
-For the 5-device stage:
-
-- ESP01/02/03: physical analyzer + controller telemetry
-- ESP04/05: controller telemetry only
-
-That means the 100 us **physical** tripwire applies only to ESP01/02/03.
-It does not prove physical COMMIT skew for ESP04/05.
-
-If physical validation of ESP04/05 is later required without adding analyzer
-inputs, rotate the three analyzer leads for a separate run, for example:
-
-    ESP01 / ESP04 / ESP05
-
-while keeping ESP01 as the physical bridge between captures.
+Python replay and actual analyzer source compiled against host IDF shims produce
+zero incomplete groups and final PASS. Original unpatched analyzer source
+produces nine incomplete groups on the same capture. This proves grouping;
+30 s trains do not prove a 40-minute RTC rate result. The ESP-IDF target build
+and hardware preflight remain pending.

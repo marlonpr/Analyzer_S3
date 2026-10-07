@@ -37,9 +37,15 @@ constexpr std::array<gpio_num_t, kChannelCount> kInputPins = {
 };
 
 constexpr std::array<const char*, kChannelCount> kChannelNames = {
-    "ESP01_COMMIT",
-    "ESP02_COMMIT",
-    "ESP03_COMMIT",
+    CONFIG_ANALYZER_V10_CHANNEL1_NAME "_COMMIT",
+    CONFIG_ANALYZER_V10_CHANNEL2_NAME "_COMMIT",
+    CONFIG_ANALYZER_V10_CHANNEL3_NAME "_COMMIT",
+};
+
+constexpr std::array<const char*, kChannelCount> kDeviceNames = {
+    CONFIG_ANALYZER_V10_CHANNEL1_NAME,
+    CONFIG_ANALYZER_V10_CHANNEL2_NAME,
+    CONFIG_ANALYZER_V10_CHANNEL3_NAME,
 };
 
 struct ChannelContext {
@@ -238,6 +244,10 @@ void ReportMissingGroup(const MatchGroup& group) {
 }
 
 void FlushExpiredGroupsLocked(int64_t now_us, bool force_all) {
+    // Qualification may emit a previous START timestamp when the next 1 Hz
+    // edge arrives. Keep that group until every other channel has had the full
+    // qualification interval plus association margin to backfill its edge.
+    // Association itself remains limited to 5 ms; original timestamps stay intact.
     for (auto& group : analysis_state.groups) {
         if (!group.valid) {
             continue;
@@ -247,8 +257,8 @@ void FlushExpiredGroupsLocked(int64_t now_us, bool force_all) {
             force_all ||
             (now_us > group.max_us &&
              now_us - group.max_us >
-                 static_cast<int64_t>(
-                     CONFIG_ANALYZER_V10_ASSOCIATION_WINDOW_US));
+                 (static_cast<int64_t>(CONFIG_ANALYZER_V10_TRAIN_MAX_US) +
+                  static_cast<int64_t>(CONFIG_ANALYZER_V10_ASSOCIATION_WINDOW_US)));
 
         if (!expired) {
             continue;
@@ -364,9 +374,9 @@ void CompleteGroupLocked(MatchGroup& group) {
         "ANZ|SKEW|%" PRIu64 "|%" PRIu32
         "|train=%" PRIu32
         "|boundary=%" PRIu32
-        "|ESP01=%" PRId64
-        "|ESP02=%" PRId64
-        "|ESP03=%" PRId64
+        "|%s=%" PRId64
+        "|%s=%" PRId64
+        "|%s=%" PRId64
         "|range_us=%" PRId64
         "|gated=%u"
         "|limit_us=%d"
@@ -375,9 +385,9 @@ void CompleteGroupLocked(MatchGroup& group) {
         copy.trial_id,
         train_id,
         boundary_index,
-        copy.timestamps[0],
-        copy.timestamps[1],
-        copy.timestamps[2],
+        kDeviceNames[0], copy.timestamps[0],
+        kDeviceNames[1], copy.timestamps[1],
+        kDeviceNames[2], copy.timestamps[2],
         range_us,
         gated ? 1U : 0U,
         CONFIG_ANALYZER_V10_START_TRIPWIRE_US,
@@ -702,20 +712,26 @@ void EndTrial(uint64_t run_id, uint32_t trial_id) {
 
     WriteProtocolLine(
         "ANZ|COUNTS|%" PRIu64 "|%" PRIu32
-        "|ESP01_RAW=%" PRIu32
-        "|ESP02_RAW=%" PRIu32
-        "|ESP03_RAW=%" PRIu32
-        "|ESP01_QUAL=%" PRIu32
-        "|ESP02_QUAL=%" PRIu32
-        "|ESP03_QUAL=%" PRIu32
+        "|%s_RAW=%" PRIu32
+        "|%s_RAW=%" PRIu32
+        "|%s_RAW=%" PRIu32
+        "|%s_QUAL=%" PRIu32
+        "|%s_QUAL=%" PRIu32
+        "|%s_QUAL=%" PRIu32
         "|dropped=%" PRIu32,
         run_id,
         trial_id,
+        kDeviceNames[0],
         capture.raw_counts[0],
+        kDeviceNames[1],
         capture.raw_counts[1],
+        kDeviceNames[2],
         capture.raw_counts[2],
+        kDeviceNames[0],
         snapshot.channels[0].qualified_count,
+        kDeviceNames[1],
         snapshot.channels[1].qualified_count,
+        kDeviceNames[2],
         snapshot.channels[2].qualified_count,
         capture.dropped_events);
 
@@ -1136,21 +1152,24 @@ extern "C" void app_main() {
 
     WriteProtocolLine(
         "ANZ|READY"
-        "|version=10"
+        "|version=10.1"
         "|mode=3DEVICE_1HZ"
         "|baud=%d"
-        "|ESP01_COMMIT=%d"
-        "|ESP02_COMMIT=%d"
-        "|ESP03_COMMIT=%d"
+        "|%s_COMMIT=%d"
+        "|%s_COMMIT=%d"
+        "|%s_COMMIT=%d"
         "|train_us=%d..%d"
         "|associate_us=%d"
         "|start_gate_boundaries=%d"
         "|start_trip_us=%d",
         CONFIG_ANALYZER_V10_UART_BAUD,
+        kDeviceNames[0],
         static_cast<int>(
             kInputPins[0]),
+        kDeviceNames[1],
         static_cast<int>(
             kInputPins[1]),
+        kDeviceNames[2],
         static_cast<int>(
             kInputPins[2]),
         CONFIG_ANALYZER_V10_TRAIN_MIN_US,
@@ -1162,9 +1181,12 @@ extern "C" void app_main() {
     WriteProtocolLine(
         "ANZ|MODE"
         "|ANYEDGE"
-        "|physical_devices=3"
-        "|controller_only_devices=ESP04,ESP05"
+        "|physical_devices=%s,%s,%s"
+        "|controller_only_devices=ESP02,ESP05"
         "|queue=%u",
+        kDeviceNames[0],
+        kDeviceNames[1],
+        kDeviceNames[2],
         static_cast<unsigned>(
             kEdgeQueueLength));
 }

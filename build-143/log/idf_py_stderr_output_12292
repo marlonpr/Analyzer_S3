@@ -1,0 +1,16 @@
+Command: cmake -G Ninja -B C:\Users\Marlon\workspace\Analyzer_S3\build-143 -DPYTHON_DEPS_CHECKED=1 -DPYTHON=C:\Espressif\tools\python\v6.0\venv\Scripts\python.exe -DESP_PLATFORM=1 -DCCACHE_ENABLE=False C:\Users\Marlon\workspace\Analyzer_S3
+Configuration Report                                                           
++-----------------------------------------------------------------------------+
+|  Parser Version: 1                                                          |
+|  Verbosity: default                                                         |
+|  Defaults policy: sdkconfig                                                 |
+|  Status: Finished with notifications                                        |
+|                                                                             |
+| Disabled Symbols/Choices With User-Set Value                                |
+| +-------------------------------------------------------------------------+ |
+| | * ESPTOOLPY_MONITOR_BAUD (defined at                                    | |
+| | C:/esp/v6.0/esp-idf/components/esptool_py/Kconfig.projbuild:201) with   | |
+| | user-set value 115200 from                                              | |
+| | C:\Users\Marlon\AppData\Local\Temp\kconfgen_tmp92lzqgfp                 | |
+| +-------------------------------------------------------------------------+ |
++-----------------------------------------------------------------------------+
